@@ -108,6 +108,7 @@ openclaw-cursor-mcp up
 npm run build
 npm run cli -- doctor --fix
 npm run acceptance:check
+npm run release:guard
 ```
 
 本地验证无误后可发布：
@@ -118,6 +119,11 @@ npm pack
 ```
 
 详细发布流程见：`RELEASE.md`
+
+生产发布约束：
+
+- 发布包不应包含 mock 脚本；`npm run release:guard` 会检查 `npm pack --dry-run` 结果并在发现 `mock` 文件时失败。
+- 可使用 `npm run local:real-test` 执行一次本机真实链路测试（发现目标、绑定会话、发送消息）。
 
 ## 上线前检查清单
 

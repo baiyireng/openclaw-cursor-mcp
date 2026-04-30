@@ -18,7 +18,9 @@
     "gateway:status": "node gateway/manage.mjs status",
     "gateway:logs": "node gateway/manage.mjs logs",
     "acceptance:check": "node scripts/acceptance-check.mjs",
-    "release:check": "npm run build && npm run cli -- doctor --fix && npm run acceptance:check",
+    "local:real-test": "node scripts/local-real-test.mjs",
+    "release:guard": "node scripts/release-guard.mjs",
+    "release:check": "npm run build && npm run cli -- doctor --fix && npm run acceptance:check && npm run release:guard",
     "bridge:mock": "node gateway/cursor-cli-wrapper.mjs demo-session demo-message"
   },
   "keywords": [

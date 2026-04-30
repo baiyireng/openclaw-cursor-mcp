@@ -1,0 +1,3 @@
+scripts/*mock*.mjs
+data/
+*.tgz
