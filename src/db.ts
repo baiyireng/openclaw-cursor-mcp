@@ -51,6 +51,14 @@ interface AuditRecord {
   createdAt: string;
 }
 
+interface LocalCursorBindingRecord {
+  sessionId: string;
+  targetCursor: string;
+  workspacePath?: string;
+  windowLabel?: string;
+  updatedAt: string;
+}
+
 interface DbState {
   sessions: SessionRecord[];
   messages: MessageRecord[];
@@ -61,6 +69,7 @@ interface DbState {
     auditId: number;
   };
   idempotency: Record<string, string>;
+  localCursorBindings: LocalCursorBindingRecord[];
 }
 
 const dbPath = process.env.OPENCLAW_CURSOR_DB_PATH ?? "./data/openclaw-cursor-db.json";
@@ -81,12 +90,16 @@ async function loadState(): Promise<DbState> {
       approvals: [],
       auditLogs: [],
       counters: { messageId: 0, auditId: 0 },
-      idempotency: {}
+      idempotency: {},
+      localCursorBindings: []
     };
     await persistState();
   }
   if (!loadedState.idempotency) {
     loadedState.idempotency = {};
+  }
+  if (!loadedState.localCursorBindings) {
+    loadedState.localCursorBindings = [];
   }
   return loadedState;
 }
@@ -307,4 +320,69 @@ export async function setIdempotencyResult(key: string, responseText: string): P
   await mutateState((state) => {
     state.idempotency[key] = responseText;
   });
+}
+
+export async function upsertLocalCursorBinding(
+  sessionId: string,
+  targetCursor: string,
+  updatedAt: string,
+  workspacePath?: string,
+  windowLabel?: string
+): Promise<void> {
+  await mutateState((state) => {
+    const existing = state.localCursorBindings.find((item) => item.sessionId === sessionId);
+    if (existing) {
+      existing.targetCursor = targetCursor;
+      existing.workspacePath = workspacePath;
+      existing.windowLabel = windowLabel;
+      existing.updatedAt = updatedAt;
+      return;
+    }
+    state.localCursorBindings.push({
+      sessionId,
+      targetCursor,
+      workspacePath,
+      windowLabel,
+      updatedAt
+    });
+  });
+}
+
+export async function getLocalCursorBinding(sessionId: string) {
+  const state = await loadState();
+  const binding = state.localCursorBindings.find((item) => item.sessionId === sessionId);
+  if (!binding) {
+    return null;
+  }
+  return {
+    sessionId: binding.sessionId,
+    targetCursor: binding.targetCursor,
+    workspacePath: binding.workspacePath ?? null,
+    windowLabel: binding.windowLabel ?? null,
+    updatedAt: binding.updatedAt
+  };
+}
+
+export async function deleteLocalCursorBinding(sessionId: string): Promise<boolean> {
+  let removed = false;
+  await mutateState((state) => {
+    const before = state.localCursorBindings.length;
+    state.localCursorBindings = state.localCursorBindings.filter((item) => item.sessionId !== sessionId);
+    removed = state.localCursorBindings.length !== before;
+  });
+  return removed;
+}
+
+export async function listLocalCursorBindings() {
+  const state = await loadState();
+  return state.localCursorBindings
+    .slice()
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .map((item) => ({
+      sessionId: item.sessionId,
+      targetCursor: item.targetCursor,
+      workspacePath: item.workspacePath ?? null,
+      windowLabel: item.windowLabel ?? null,
+      updatedAt: item.updatedAt
+    }));
 }

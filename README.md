@@ -24,6 +24,9 @@
 - `cursor_gateway_config_get`：读取网关配置文件（需 `adminToken`）。
 - `cursor_gateway_config_update`：按 JSON 深度合并方式更新网关配置（需 `adminToken`）。
 - `cursor_gateway_process_status` / `start` / `stop` / `restart` / `logs`：通过 MCP 直接管理网关进程（需 `adminToken`）。
+- `cursor_local_session_bind` / `unbind` / `get_binding` / `list_bindings`：将 OpenClaw 会话绑定到本机 Cursor 目标（支持多窗口/多会话路由）。
+- `cursor_local_target_list`：读取可发现的本机 Cursor 目标（窗口/工作区），用于绑定前选择路由目标。
+- `cursor_local_target_refresh`：调用本机发现命令实时刷新目标列表（需 `adminToken`）。
 - `cursor_session_send_message` 默认强制 `chat_send` 授权检查。
 - `cursor_session_send_message` 支持 `idempotencyKey` 去重（重试不重复执行）。
 - 未传 `idempotencyKey` 时，自动用 `sessionId + callerId + 归一化消息` 生成默认幂等键。
@@ -113,6 +116,8 @@ npm run acceptance:check
 npm pack
 # 或 npm publish（发布到 npm）
 ```
+
+详细发布流程见：`RELEASE.md`
 
 ## 上线前检查清单
 
@@ -242,6 +247,12 @@ npm run dev
 - `OPENCLAW_ADMIN_TOKEN`：授权审批管理员令牌（必配，供 grant/revoke 校验）。
 - `OPENCLAW_PERMISSION_TTL_MS`：审批默认有效期（毫秒），默认 `86400000`（24h）。
 - `CURSOR_ADAPTER_MODE`：`mock` / `http` / `cli`。
+- `CURSOR_LOCAL_CMD`：`local_cursor` 模式下执行命令（例如 `cursor.cmd` 或自定义桥接命令）。
+- `CURSOR_LOCAL_ARGS_JSON`：`local_cursor` 参数模板（JSON 字符串数组，支持 `{{sessionId}}`、`{{message}}`、`{{targetCursor}}`）。
+- `CURSOR_LOCAL_TARGETS_PATH`：本地目标列表 JSON 文件路径（数组，每项含 `targetCursor` 等字段）。
+- `CURSOR_LOCAL_TARGETS_JSON`：直接以内联 JSON 数组提供本地目标列表（优先级高于 `CURSOR_LOCAL_TARGETS_PATH`）。
+- `CURSOR_LOCAL_TARGET_DISCOVERY_CMD`：目标发现命令（输出 JSON 数组到 stdout）。
+- `CURSOR_LOCAL_TARGET_DISCOVERY_ARGS_JSON`：目标发现命令参数（JSON 字符串数组）。
 - `CURSOR_API_BASEURL`：`http` 模式下 Cursor 后端地址。
 - `CURSOR_API_ENDPOINT`：`http` 模式下接口路径，默认 `/chat`。
 - `CURSOR_CLI_CMD`：`cli` 模式下命令路径，参数为 `[sessionId, message]`。
@@ -291,6 +302,21 @@ npm run dev
 - `mock`：本地模拟响应，便于联调。
 - `http`：POST 到 `${CURSOR_API_BASEURL}${CURSOR_API_ENDPOINT}`，body 为 `{ sessionId, message, traceId }`，并透传 `x-trace-id`。
 - `cli`：调用 `CURSOR_CLI_CMD sessionId message` 并读取 stdout 作为回复。
+- `local_cursor`：调用 `CURSOR_LOCAL_CMD`，支持按 `targetCursor` 将请求路由到指定本地 Cursor 会话/窗口。
+
+### 本机 Cursor 会话路由（多窗口/多会话）
+
+推荐流程：
+
+1. 使用 `cursor_local_session_bind` 将 OpenClaw 的 `sessionId` 绑定到 `targetCursor`（例如窗口标签/会话标识）。
+2. 调用 `cursor_session_send_message` 时可不传 `targetCursor`，系统会自动走绑定目标。
+3. 若需临时覆盖，可在 `cursor_session_send_message` 显式传 `targetCursor`。
+
+说明：
+
+- `targetCursor` 只是统一路由键，具体含义由你的 `CURSOR_LOCAL_CMD` 实现决定（窗口 ID、工作区路径、会话名等）。
+- 可先调用 `cursor_local_target_list` 获取当前可选目标，再调用 `cursor_local_session_bind` 进行绑定。
+- 若希望读取实时窗口状态，可先调用 `cursor_local_target_refresh`，再调用 `cursor_local_target_list`。
 
 ### 最小 HTTP 网关联调
 

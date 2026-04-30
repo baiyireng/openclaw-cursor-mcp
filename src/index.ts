@@ -12,29 +12,36 @@ import {
   addMessage,
   createApproval,
   createSession,
+  deleteLocalCursorBinding,
   getApprovalById,
+  getLocalCursorBinding,
   getSessionById,
   getIdempotencyResult,
   hasGrantedPermission,
   listApprovals,
   listAuditLogs,
+  listLocalCursorBindings,
   listSessionSummaries,
   setSessionStatus,
   setIdempotencyResult,
   updateApprovalStatus,
+  upsertLocalCursorBinding,
   type PermissionAction
 } from "./db.js";
 
 const execFileAsync = promisify(execFile);
 
 class CursorAdapter {
-  async sendMessage(sessionId: string, text: string, traceId: string): Promise<string> {
+  async sendMessage(sessionId: string, text: string, traceId: string, targetCursor?: string): Promise<string> {
     const mode = process.env.CURSOR_ADAPTER_MODE ?? "mock";
     if (mode === "http") {
       return this.sendByHttp(sessionId, text, traceId);
     }
     if (mode === "cli") {
       return this.sendByCli(sessionId, text, traceId);
+    }
+    if (mode === "local_cursor") {
+      return this.sendByLocalCursor(sessionId, text, traceId, targetCursor);
     }
     return this.sendByMock(sessionId, text, traceId);
   }
@@ -81,6 +88,32 @@ class CursorAdapter {
     });
     return stdout.trim();
   }
+
+  private async sendByLocalCursor(
+    sessionId: string,
+    text: string,
+    traceId: string,
+    targetCursor?: string
+  ): Promise<string> {
+    const cmd = process.env.CURSOR_LOCAL_CMD || process.env.CURSOR_CLI_CMD;
+    if (!cmd) {
+      throw new Error("CURSOR_LOCAL_CMD is required when CURSOR_ADAPTER_MODE=local_cursor");
+    }
+    const target = targetCursor ?? "";
+    const argsTemplate = parseArgsTemplate(process.env.CURSOR_LOCAL_ARGS_JSON) ?? ["{{sessionId}}", "{{message}}", "{{targetCursor}}"];
+    const args = argsTemplate.map((item) =>
+      item.replaceAll("{{sessionId}}", sessionId).replaceAll("{{message}}", text).replaceAll("{{targetCursor}}", target)
+    );
+    const { stdout } = await execFileAsync(cmd, args, {
+      windowsHide: true,
+      env: { ...process.env, OPENCLAW_TRACE_ID: traceId, OPENCLAW_TARGET_CURSOR: target }
+    });
+    const output = stdout.trim();
+    if (!output) {
+      throw new Error("local_cursor returned empty stdout");
+    }
+    return output;
+  }
 }
 
 const cursorAdapter = new CursorAdapter();
@@ -93,7 +126,10 @@ const sendMessageInput = z.object({
   sessionId: z.string().min(1),
   content: z.string().min(1),
   idempotencyKey: z.string().min(8).max(120).optional(),
-  callerId: z.string().min(1).max(120).optional()
+  callerId: z.string().min(1).max(120).optional(),
+  targetCursor: z.string().min(1).max(240).optional(),
+  sourceChannel: z.enum(["wechat", "qq", "openclaw", "other"]).optional(),
+  sourceUserId: z.string().min(1).max(120).optional()
 });
 
 const getSessionInput = z.object({
@@ -139,6 +175,29 @@ const gatewayLogsInput = z.object({
   lines: z.number().int().min(1).max(2000).default(200)
 });
 
+const localBindInput = z.object({
+  sessionId: z.string().min(1),
+  targetCursor: z.string().min(1).max(240),
+  workspacePath: z.string().min(1).max(500).optional(),
+  windowLabel: z.string().min(1).max(240).optional(),
+  adminToken: z.string().min(1)
+});
+
+const localUnbindInput = z.object({
+  sessionId: z.string().min(1),
+  adminToken: z.string().min(1)
+});
+
+const localGetBindInput = z.object({
+  sessionId: z.string().min(1)
+});
+
+const localTargetListInput = z.object({});
+
+const localTargetRefreshInput = z.object({
+  adminToken: z.string().min(1)
+});
+
 const server = new Server(
   { name: "openclaw-cursor-mcp", version: "0.2.0" },
   { capabilities: { tools: {} } }
@@ -163,6 +222,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           callerId: {
             type: "string",
             description: "Optional caller identity used by default idempotency key generation"
+          },
+          targetCursor: {
+            type: "string",
+            description: "Optional local cursor target override (window/session label or ID)"
+          },
+          sourceChannel: {
+            type: "string",
+            enum: ["wechat", "qq", "openclaw", "other"],
+            description: "Optional source channel for auditing"
+          },
+          sourceUserId: {
+            type: "string",
+            description: "Optional source user id for auditing"
           }
         },
         required: ["sessionId", "content"]
@@ -317,6 +389,65 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         required: ["adminToken"]
       }
+    },
+    {
+      name: "cursor_local_session_bind",
+      description: "Bind OpenClaw session to a local Cursor target (admin token required)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          targetCursor: { type: "string" },
+          workspacePath: { type: "string" },
+          windowLabel: { type: "string" },
+          adminToken: { type: "string" }
+        },
+        required: ["sessionId", "targetCursor", "adminToken"]
+      }
+    },
+    {
+      name: "cursor_local_session_unbind",
+      description: "Remove local Cursor binding for an OpenClaw session (admin token required)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          adminToken: { type: "string" }
+        },
+        required: ["sessionId", "adminToken"]
+      }
+    },
+    {
+      name: "cursor_local_session_get_binding",
+      description: "Get local Cursor binding for an OpenClaw session",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" }
+        },
+        required: ["sessionId"]
+      }
+    },
+    {
+      name: "cursor_local_session_list_bindings",
+      description: "List all local Cursor session bindings",
+      inputSchema: { type: "object", properties: {}, required: [] }
+    },
+    {
+      name: "cursor_local_target_list",
+      description: "List discoverable local Cursor targets (windows/workspaces) for routing",
+      inputSchema: { type: "object", properties: {}, required: [] }
+    },
+    {
+      name: "cursor_local_target_refresh",
+      description: "Refresh discoverable local Cursor targets via local discovery command (admin token required)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          adminToken: { type: "string" }
+        },
+        required: ["adminToken"]
+      }
     }
   ]
 }));
@@ -364,30 +495,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     await addMessage(input.sessionId, "user", input.content, startedAt);
     await addAuditLog(
       "session.message.user",
-      { content: input.content, traceId, idempotencyKey: effectiveIdempotencyKey },
+      {
+        content: input.content,
+        traceId,
+        idempotencyKey: effectiveIdempotencyKey,
+        sourceChannel: input.sourceChannel ?? null,
+        sourceUserId: input.sourceUserId ?? null
+      },
       startedAt,
       input.sessionId
     );
 
     try {
-      const reply = await cursorAdapter.sendMessage(input.sessionId, input.content, traceId);
+      const binding = await getLocalCursorBinding(input.sessionId);
+      const targetCursor = input.targetCursor ?? binding?.targetCursor ?? undefined;
+      const reply = await cursorAdapter.sendMessage(input.sessionId, input.content, traceId, targetCursor);
       const finishedAt = new Date().toISOString();
       await addMessage(input.sessionId, "assistant", reply, finishedAt);
       await setSessionStatus(input.sessionId, "idle", finishedAt);
-      await addAuditLog("session.message.assistant", { reply, traceId }, finishedAt, input.sessionId);
+      await addAuditLog("session.message.assistant", { reply, traceId, targetCursor }, finishedAt, input.sessionId);
       const responsePayload = {
         ok: true,
         sessionId: input.sessionId,
         reply,
         traceId,
-        idempotencyKey: effectiveIdempotencyKey
+        idempotencyKey: effectiveIdempotencyKey,
+        targetCursor
       };
       await setIdempotencyResult(effectiveIdempotencyKey, JSON.stringify(responsePayload, null, 2));
       return toText(responsePayload);
     } catch (error) {
       const failedAt = new Date().toISOString();
       await setSessionStatus(input.sessionId, "error", failedAt);
-      await addAuditLog("session.send_message.error", { message: String(error), traceId }, failedAt, input.sessionId);
+      await addAuditLog(
+        "session.send_message.error",
+        {
+          message: String(error),
+          traceId,
+          sourceChannel: input.sourceChannel ?? null,
+          sourceUserId: input.sourceUserId ?? null
+        },
+        failedAt,
+        input.sessionId
+      );
       throw error;
     }
   }
@@ -542,6 +692,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tail = lines.slice(-input.lines).join("\n");
     await addAuditLog("gateway.process.logs", { invokedBy: "mcp", lines: input.lines }, new Date().toISOString());
     return toText({ ok: true, lines: input.lines, output: tail });
+  }
+
+  if (name === "cursor_local_session_bind") {
+    const input = localBindInput.parse(args ?? {});
+    assertAdminToken(input.adminToken);
+    const session = await getSessionById(input.sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${input.sessionId}`);
+    }
+    const now = new Date().toISOString();
+    await upsertLocalCursorBinding(input.sessionId, input.targetCursor, now, input.workspacePath, input.windowLabel);
+    await addAuditLog(
+      "local.session.bind",
+      { targetCursor: input.targetCursor, workspacePath: input.workspacePath ?? null, windowLabel: input.windowLabel ?? null },
+      now,
+      input.sessionId
+    );
+    return toText({ ok: true, binding: await getLocalCursorBinding(input.sessionId) });
+  }
+
+  if (name === "cursor_local_session_unbind") {
+    const input = localUnbindInput.parse(args ?? {});
+    assertAdminToken(input.adminToken);
+    const removed = await deleteLocalCursorBinding(input.sessionId);
+    await addAuditLog("local.session.unbind", { removed }, new Date().toISOString(), input.sessionId);
+    return toText({ ok: true, removed });
+  }
+
+  if (name === "cursor_local_session_get_binding") {
+    const input = localGetBindInput.parse(args ?? {});
+    return toText({ ok: true, binding: await getLocalCursorBinding(input.sessionId) });
+  }
+
+  if (name === "cursor_local_session_list_bindings") {
+    return toText({ ok: true, bindings: await listLocalCursorBindings() });
+  }
+
+  if (name === "cursor_local_target_list") {
+    localTargetListInput.parse(args ?? {});
+    return toText({ ok: true, targets: await listLocalCursorTargets() });
+  }
+
+  if (name === "cursor_local_target_refresh") {
+    const input = localTargetRefreshInput.parse(args ?? {});
+    assertAdminToken(input.adminToken);
+    const now = new Date().toISOString();
+    const refreshed = await refreshLocalCursorTargets();
+    await addAuditLog(
+      "local.target.refresh",
+      { count: refreshed.length, persisted: Boolean(process.env.CURSOR_LOCAL_TARGETS_PATH) },
+      now
+    );
+    return toText({ ok: true, refreshedAt: now, count: refreshed.length, targets: refreshed });
   }
 
   throw new Error(`Unknown tool: ${name}`);
@@ -703,6 +906,74 @@ function computeMetrics(
 
 function round4(n: number) {
   return Math.round(n * 10000) / 10000;
+}
+
+function parseArgsTemplate(raw: string | undefined) {
+  if (!raw) {
+    return null;
+  }
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
+    throw new Error("CURSOR_LOCAL_ARGS_JSON must be a JSON string array");
+  }
+  return parsed as string[];
+}
+
+async function listLocalCursorTargets() {
+  const filePath = process.env.CURSOR_LOCAL_TARGETS_PATH;
+  const inlineJson = process.env.CURSOR_LOCAL_TARGETS_JSON;
+  let source = "";
+  if (inlineJson) {
+    source = inlineJson;
+  } else if (filePath) {
+    source = await readFile(isAbsolute(filePath) ? filePath : resolve(process.cwd(), filePath), "utf8");
+  } else {
+    return [];
+  }
+  const parsed = JSON.parse(source);
+  return normalizeLocalTargets(parsed);
+}
+
+async function refreshLocalCursorTargets() {
+  const cmd = process.env.CURSOR_LOCAL_TARGET_DISCOVERY_CMD;
+  if (!cmd) {
+    throw new Error("CURSOR_LOCAL_TARGET_DISCOVERY_CMD is required for cursor_local_target_refresh");
+  }
+  const argsTemplate = parseArgsTemplate(process.env.CURSOR_LOCAL_TARGET_DISCOVERY_ARGS_JSON) ?? [];
+  const { stdout } = await execFileAsync(cmd, argsTemplate, {
+    windowsHide: true,
+    env: { ...process.env }
+  });
+  const parsed = JSON.parse(stdout.trim() || "[]");
+  const targets = normalizeLocalTargets(parsed);
+  await persistLocalTargets(targets);
+  return targets;
+}
+
+function normalizeLocalTargets(parsed: unknown) {
+  if (!Array.isArray(parsed)) {
+    throw new Error("Local targets must be a JSON array");
+  }
+  return parsed
+    .filter((item) => isPlainObject(item) && typeof item.targetCursor === "string" && item.targetCursor.trim().length > 0)
+    .map((item) => ({
+      targetCursor: String(item.targetCursor),
+      workspacePath: typeof item.workspacePath === "string" ? item.workspacePath : null,
+      windowLabel: typeof item.windowLabel === "string" ? item.windowLabel : null,
+      active: typeof item.active === "boolean" ? item.active : null
+    }));
+}
+
+async function persistLocalTargets(
+  targets: Array<{ targetCursor: string; workspacePath: string | null; windowLabel: string | null; active: boolean | null }>
+) {
+  const filePath = process.env.CURSOR_LOCAL_TARGETS_PATH;
+  if (!filePath) {
+    return;
+  }
+  const resolved = isAbsolute(filePath) ? filePath : resolve(process.cwd(), filePath);
+  await mkdir(dirname(resolved), { recursive: true });
+  await writeFile(resolved, JSON.stringify(targets, null, 2), "utf8");
 }
 
 function getGatewayConfigPath() {
