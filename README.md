@@ -20,9 +20,15 @@
 新增：
 
 - `cursor_audit_list`：查询审计事件。
+- `cursor_metrics_get`：聚合审计日志，输出轻量可靠性指标（成功率、超时率、权限拦截率、平均耗时）。
+- `cursor_gateway_config_get`：读取网关配置文件（需 `adminToken`）。
+- `cursor_gateway_config_update`：按 JSON 深度合并方式更新网关配置（需 `adminToken`）。
+- `cursor_gateway_process_status` / `start` / `stop` / `restart` / `logs`：通过 MCP 直接管理网关进程（需 `adminToken`）。
 - `cursor_session_send_message` 默认强制 `chat_send` 授权检查。
 - `cursor_session_send_message` 支持 `idempotencyKey` 去重（重试不重复执行）。
+- 未传 `idempotencyKey` 时，自动用 `sessionId + callerId + 归一化消息` 生成默认幂等键。
 - `cursor_permission_grant` / `cursor_permission_revoke` 强制 `adminToken` 校验。
+- `cursor_permission_request` 支持有效期（`expiresInMs`），过期授权不会通过 `chat_send` 校验。
 
 ## 快速开始
 
@@ -44,6 +50,25 @@ npm run dev
 npm run gateway
 ```
 
+推荐使用可控管理命令（避免“启动后不易停止”）：
+
+```bash
+npm run gateway:start
+npm run gateway:status
+npm run gateway:stop
+```
+
+可选：
+
+- `npm run gateway:restart`
+- `npm run gateway:logs`
+
+说明：
+
+- `gateway:start` 会写入 PID 到 `data/runtime/gateway.pid`
+- `gateway:stop` 会优雅停止（超时后强制结束）
+- `gateway:logs` 查看 `data/runtime/gateway.log`
+
 打开可视化配置页面（网关启动后）：
 
 - `http://127.0.0.1:8787/config`
@@ -61,7 +86,7 @@ npm run build
 ### 1. 启动 Gateway（下游）
 
 ```bash
-npm run gateway
+npm run gateway:start
 ```
 
 启动成功日志示例：
@@ -120,11 +145,14 @@ npm run dev
 3. `cursor_permission_grant`（带 `adminToken`）
 4. `cursor_session_send_message`
 5. `cursor_session_get` / `cursor_audit_list`
+6. 可选：`cursor_metrics_get` 查看最近窗口稳定性指标。
+7. 可选：`cursor_gateway_config_get` / `cursor_gateway_config_update` 由 OpenClaw 自动调整网关配置（例如切换 mode、更新 cloud 参数）。
 
 可选环境变量：
 
 - `OPENCLAW_CURSOR_DB_PATH`：持久化文件路径（JSON）。
 - `OPENCLAW_ADMIN_TOKEN`：授权审批管理员令牌（必配，供 grant/revoke 校验）。
+- `OPENCLAW_PERMISSION_TTL_MS`：审批默认有效期（毫秒），默认 `86400000`（24h）。
 - `CURSOR_ADAPTER_MODE`：`mock` / `http` / `cli`。
 - `CURSOR_API_BASEURL`：`http` 模式下 Cursor 后端地址。
 - `CURSOR_API_ENDPOINT`：`http` 模式下接口路径，默认 `/chat`。
@@ -142,9 +170,12 @@ npm run dev
 - `CURSOR_CLOUD_WORKSPACE_PATH`：创建 agent 时使用的工作目录，默认 `.`。
 - `CURSOR_CLOUD_MODEL`：可选，指定 Cloud Agent 模型。
 - `CURSOR_CLOUD_POLL_INTERVAL_MS`：run 状态轮询间隔，默认 `1500`。
+- `CURSOR_CLOUD_POLL_MAX_INTERVAL_MS`：指数退避轮询的最大间隔，默认 `5000`。
+- `CURSOR_CLOUD_POLL_BACKOFF_MULTIPLIER`：轮询退避系数，默认 `1.5`。
 - `CURSOR_CLOUD_TIMEOUT_MS`：run 超时，默认 `120000`。
 - `CURSOR_CLOUD_REQUIRED`：`true` 时若缺少 API key 直接报错；否则回退到本地提示回复。
 - `CURSOR_SESSION_AGENT_CACHE_PATH`：`sessionId -> agentId` 持久化缓存文件（默认 `./data/session-agent-map.json`）。
+- `CURSOR_SESSION_AGENT_TTL_MS`：`sessionId -> agentId` 映射 TTL，过期后自动重建 agent，默认 `86400000`（24h）。
 - `CURSOR_BRIDGE_MODE`：`gateway/cursor-cli-wrapper.mjs` 的模式，`mock` / `cursor-agent-json` / `command`。
 - `CURSOR_REAL_CLI_CMD`：wrapper 在 `command` 模式下调用的真实命令。
 - `CURSOR_REAL_CLI_ARGS_JSON`：真实命令参数模板（JSON 字符串数组，支持 `{{sessionId}}`、`{{message}}`）。
@@ -158,7 +189,8 @@ npm run dev
 1. 在 OpenClaw 中将该进程注册为 MCP server（stdio 模式），可参考 `examples/openclaw-mcp-config.json`。
 2. OpenClaw 调用 `cursor_session_create` 创建会话。
 3. 发送消息前，OpenClaw 可先调用 `cursor_permission_request`。
-4. 管理端调用 `cursor_permission_grant`（携带 `adminToken`）通过授权后，再调用 `cursor_session_send_message`（建议带 `idempotencyKey`）。
+   - 可选传 `expiresInMs` 指定本次审批有效期（毫秒）。
+4. 管理端调用 `cursor_permission_grant`（携带 `adminToken`）通过授权后，再调用 `cursor_session_send_message`（建议显式传 `idempotencyKey`；不传则自动生成）。
 5. 通过 `cursor_session_get` / `cursor_session_list` 回读状态。
 6. 用 `cursor_audit_list` 审计关键动作。
 
@@ -167,7 +199,7 @@ npm run dev
 当前 `src/index.ts` 中 `CursorAdapter` 已支持三种模式：
 
 - `mock`：本地模拟响应，便于联调。
-- `http`：POST 到 `${CURSOR_API_BASEURL}${CURSOR_API_ENDPOINT}`，body 为 `{ sessionId, message }`。
+- `http`：POST 到 `${CURSOR_API_BASEURL}${CURSOR_API_ENDPOINT}`，body 为 `{ sessionId, message, traceId }`，并透传 `x-trace-id`。
 - `cli`：调用 `CURSOR_CLI_CMD sessionId message` 并读取 stdout 作为回复。
 
 ### 最小 HTTP 网关联调
@@ -180,8 +212,51 @@ npm run dev
 3. 健康检查：`GET http://127.0.0.1:8787/health`
 4. 网关聊天接口：
    - `POST /chat`
-   - 请求体：`{ "sessionId": "xxx", "message": "hello" }`
-   - 返回体：`{ "reply": "..." }`
+   - 请求体：`{ "sessionId": "xxx", "message": "hello", "traceId": "optional-trace-id" }`
+   - 成功返回：`{ "ok": true, "reply": "...", "traceId": "..." }`
+   - 失败返回：`{ "ok": false, "code": "...", "message": "...", "traceId": "...", "retryable": true|false, "detail": ... }`
+
+### 重试策略建议（OpenClaw 调用侧）
+
+- 对 `cursor_session_send_message`：优先显式传 `idempotencyKey`；若未传，服务端会按 `sessionId + callerId + 归一化消息` 自动生成默认键。
+- 若网关返回 `retryable=true`（例如 `CLI_TIMEOUT` / `CLI_EXEC_FAILED` / `PLUGIN_INVALID_REPLY`），可按指数退避重试，并复用同一 `idempotencyKey`。
+- 若 `retryable=false`（如参数错误、权限错误、配置错误），应直接失败并提示人工处理。
+- 排障时统一使用 `traceId` 串联 OpenClaw 日志、MCP 审计日志、Gateway/Provider 日志。
+
+### 轻量指标观测（MCP）
+
+- 工具：`cursor_metrics_get`
+- 入参：
+  - `lookbackHours`：统计窗口（小时，默认 `24`）
+  - `limit`：最多扫描审计条数（默认 `1000`）
+- 输出指标：
+  - `rates.successRate`：发送成功率
+  - `rates.timeoutRate`：超时错误率
+  - `rates.permissionBlockedRate`：权限拦截率
+  - `latency.avgMs`：平均端到端耗时（基于 `session.message.user -> session.message.assistant`）
+
+### 配置自动化（MCP）
+
+- 工具：`cursor_gateway_config_get`
+  - 入参：`adminToken`
+  - 返回：当前 `gateway/config/gateway.config.json`（或 `CURSOR_GATEWAY_CONFIG_PATH` 指定路径）的配置内容
+- 工具：`cursor_gateway_config_update`
+  - 入参：`adminToken`, `patch`
+  - 行为：以“深度合并（deep merge）”方式更新配置；只覆盖 `patch` 中给出的字段
+  - 典型用途：OpenClaw 自动切换 `gateway.mode`、更新 `cloud.CURSOR_CLOUD_MODEL`、调整轮询参数等
+- 安全：两个工具都要求 `adminToken`，并写入审计事件（`gateway.config.get` / `gateway.config.update`）
+
+### 网关进程自动运维（MCP）
+
+- 工具：
+  - `cursor_gateway_process_status`
+  - `cursor_gateway_process_start`
+  - `cursor_gateway_process_stop`
+  - `cursor_gateway_process_restart`
+  - `cursor_gateway_process_logs`（支持 `lines` 参数，默认 200）
+- 全部要求 `adminToken`
+- 底层调用 `gateway/manage.mjs`，与本地 `npm run gateway:*` 行为一致
+- 适合 OpenClaw 自动化场景：发布后重启、故障自愈、日志回读
 
 ### 从 mock 迁移到真实 CLI
 

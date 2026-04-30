@@ -7,6 +7,7 @@ let cacheLoaded = false;
 export async function generateReply(sessionId, message, context) {
   const env = context?.env ?? process.env;
   const config = context?.config ?? {};
+  const traceId = context?.traceId ?? `plugin-${Date.now()}`;
   const baseUrl = String(readConfig(config, env, "CURSOR_CLOUD_API_BASE_URL", "https://api.cursor.com")).replace(/\/$/, "");
   const apiKey = readConfig(config, env, "CURSOR_CLOUD_API_KEY", "");
   const required = toBool(readConfig(config, env, "CURSOR_CLOUD_REQUIRED", false), false);
@@ -25,21 +26,34 @@ export async function generateReply(sessionId, message, context) {
   const cachePath = String(
     readConfig(config, env, "CURSOR_SESSION_AGENT_CACHE_PATH", "./data/session-agent-map.json")
   );
+  const agentTtlMs = toInt(readConfig(config, env, "CURSOR_SESSION_AGENT_TTL_MS", 86400000), 86400000);
+  const pollMaxIntervalMs = toInt(readConfig(config, env, "CURSOR_CLOUD_POLL_MAX_INTERVAL_MS", 5000), 5000);
+  const pollBackoffMultiplier = toFloat(readConfig(config, env, "CURSOR_CLOUD_POLL_BACKOFF_MULTIPLIER", 1.5), 1.5);
 
   const agentId = await ensureAgent(sessionId, {
     baseUrl,
     apiKey,
     model,
     workspacePath,
-    cachePath
+    cachePath,
+    traceId,
+    agentTtlMs
   });
 
-  const run = await createRun({
+  const runInfo = await createRunWithRecovery({
+    sessionId,
     baseUrl,
     apiKey,
     agentId,
-    message
+    message,
+    traceId,
+    cachePath,
+    model,
+    workspacePath,
+    agentTtlMs
   });
+  const activeAgentId = runInfo.agentId;
+  const run = runInfo.run;
 
   const runId = pick(run, ["id", "run_id", "runId"]);
   if (!runId) {
@@ -49,26 +63,37 @@ export async function generateReply(sessionId, message, context) {
   const finalState = await waitForRunDone({
     baseUrl,
     apiKey,
-    agentId,
+    agentId: activeAgentId,
     runId,
     pollIntervalMs,
-    timeoutMs
+    pollMaxIntervalMs,
+    pollBackoffMultiplier,
+    timeoutMs,
+    traceId
   });
 
   const reply = extractReply(finalState);
   if (!reply) {
-    throw new Error(`run completed but reply not found: ${JSON.stringify(finalState)}`);
+    return buildReplyFallback({
+      traceId,
+      reason: "run_completed_without_extractable_reply",
+      payload: finalState
+    });
   }
   return reply;
 }
 
 async function ensureAgent(sessionId, opts) {
   await loadSessionAgentCache(opts.cachePath);
-  const cached = sessionAgentMap.get(sessionId);
-  if (cached) {
-    return cached;
+  const cached = getValidCachedAgent(sessionId);
+  if (cached?.agentId) {
+    return cached.agentId;
   }
 
+  return createAndCacheAgent(sessionId, opts);
+}
+
+async function createAndCacheAgent(sessionId, opts) {
   const payload = {
     name: `openclaw-${sessionId}`,
     workspace: { path: opts.workspacePath }
@@ -77,27 +102,69 @@ async function ensureAgent(sessionId, opts) {
     payload.model = opts.model;
   }
 
-  const created = await postJson(`${opts.baseUrl}/v1/agents`, payload, opts.apiKey);
+  const created = await postJson(`${opts.baseUrl}/v1/agents`, payload, opts.apiKey, opts.traceId);
   const agentId = pick(created, ["id", "agent_id", "agentId"]);
   if (!agentId) {
     throw new Error(`create agent response missing id: ${JSON.stringify(created)}`);
   }
-  sessionAgentMap.set(sessionId, agentId);
+  const now = Date.now();
+  sessionAgentMap.set(sessionId, {
+    agentId,
+    createdAt: now,
+    expiresAt: now + Math.max(1000, opts.agentTtlMs)
+  });
   await persistSessionAgentCache(opts.cachePath);
   return agentId;
 }
 
-async function createRun({ baseUrl, apiKey, agentId, message }) {
-  return postJson(`${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/runs`, { message }, apiKey);
+async function createRun({ baseUrl, apiKey, agentId, message, traceId }) {
+  return postJson(`${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/runs`, { message }, apiKey, traceId);
 }
 
-async function waitForRunDone({ baseUrl, apiKey, agentId, runId, pollIntervalMs, timeoutMs }) {
+async function createRunWithRecovery(opts) {
+  try {
+    const run = await createRun(opts);
+    return { run, agentId: opts.agentId };
+  } catch (error) {
+    if (!isAgentMissingError(error)) {
+      throw error;
+    }
+
+    sessionAgentMap.delete(opts.sessionId);
+    await persistSessionAgentCache(opts.cachePath);
+    const refreshedAgentId = await createAndCacheAgent(opts.sessionId, opts);
+    const run = await createRun({
+      baseUrl: opts.baseUrl,
+      apiKey: opts.apiKey,
+      agentId: refreshedAgentId,
+      message: opts.message,
+      traceId: opts.traceId
+    });
+    return { run, agentId: refreshedAgentId };
+  }
+}
+
+async function waitForRunDone({
+  baseUrl,
+  apiKey,
+  agentId,
+  runId,
+  pollIntervalMs,
+  pollMaxIntervalMs,
+  pollBackoffMultiplier,
+  timeoutMs,
+  traceId
+}) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
+  let attempts = 0;
+  let currentIntervalMs = Math.max(100, pollIntervalMs);
   while (Date.now() < deadline) {
+    attempts += 1;
     last = await getJson(
       `${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}`,
-      apiKey
+      apiKey,
+      traceId
     );
     const status = pick(last, ["status", "state"]);
     if (status === "completed" || status === "succeeded") {
@@ -106,40 +173,51 @@ async function waitForRunDone({ baseUrl, apiKey, agentId, runId, pollIntervalMs,
     if (status === "failed" || status === "cancelled" || status === "canceled") {
       throw new Error(`run ended with status=${status}: ${JSON.stringify(last)}`);
     }
-    await sleep(pollIntervalMs);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+    await sleep(Math.min(currentIntervalMs, remainingMs));
+    currentIntervalMs = Math.min(
+      pollMaxIntervalMs,
+      Math.ceil(currentIntervalMs * Math.max(1.01, pollBackoffMultiplier))
+    );
   }
-  throw new Error(`run timeout after ${timeoutMs}ms, last=${JSON.stringify(last)}`);
+  throw new Error(`run timeout after ${timeoutMs}ms, attempts=${attempts}, last=${JSON.stringify(last)}`);
 }
 
-async function postJson(url, body, apiKey) {
+async function postJson(url, body, apiKey, traceId) {
   const resp = await fetch(url, {
     method: "POST",
-    headers: buildHeaders(apiKey),
+    headers: buildHeaders(apiKey, traceId),
     body: JSON.stringify(body)
   });
-  return handleResponse(resp, "POST", url);
+  return handleResponse(resp, "POST", url, traceId);
 }
 
-async function getJson(url, apiKey) {
+async function getJson(url, apiKey, traceId) {
   const resp = await fetch(url, {
     method: "GET",
-    headers: buildHeaders(apiKey)
+    headers: buildHeaders(apiKey, traceId)
   });
-  return handleResponse(resp, "GET", url);
+  return handleResponse(resp, "GET", url, traceId);
 }
 
-function buildHeaders(apiKey) {
+function buildHeaders(apiKey, traceId) {
   return {
     "content-type": "application/json",
-    authorization: `Bearer ${apiKey}`
+    authorization: `Bearer ${apiKey}`,
+    "x-trace-id": traceId
   };
 }
 
-async function handleResponse(resp, method, url) {
+async function handleResponse(resp, method, url, traceId) {
   const text = await resp.text();
   const data = tryParseJson(text) ?? { raw: text };
   if (!resp.ok) {
-    throw new Error(`${method} ${url} failed: ${resp.status} ${resp.statusText} body=${JSON.stringify(data)}`);
+    throw new Error(
+      `${method} ${url} failed: ${resp.status} ${resp.statusText} traceId=${traceId} body=${JSON.stringify(data)}`
+    );
   }
   return data;
 }
@@ -153,6 +231,34 @@ function extractReply(payload) {
   if (typeof direct === "string" && direct.trim()) {
     return direct.trim();
   }
+  if (Array.isArray(direct)) {
+    const joined = direct
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object") {
+          return asText(pick(item, ["text", "content", "value"]));
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (joined) {
+      return joined;
+    }
+  }
+
+  const choiceText = asText(payload?.choices?.[0]?.message?.content ?? payload?.choices?.[0]?.text);
+  if (choiceText) {
+    return choiceText;
+  }
+
+  const dataText = asText(payload?.data?.reply ?? payload?.data?.output ?? payload?.result?.text);
+  if (dataText) {
+    return dataText;
+  }
 
   if (Array.isArray(payload.messages)) {
     const assistantMessages = payload.messages.filter((m) => m?.role === "assistant");
@@ -160,6 +266,24 @@ function extractReply(payload) {
     const c = last?.content;
     if (typeof c === "string" && c.trim()) {
       return c.trim();
+    }
+    if (Array.isArray(c)) {
+      const parts = c
+        .map((part) => {
+          if (typeof part === "string") {
+            return part;
+          }
+          if (part && typeof part === "object") {
+            return asText(part.text ?? part.content ?? part.value);
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      if (parts) {
+        return parts;
+      }
     }
   }
 
@@ -186,8 +310,21 @@ function tryParseJson(text) {
   }
 }
 
+function asText(value) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  return null;
+}
+
 function toInt(value, fallback) {
   const n = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toFloat(value, fallback) {
+  const n = Number.parseFloat(String(value ?? ""));
   return Number.isFinite(n) ? n : fallback;
 }
 
@@ -214,7 +351,18 @@ async function loadSessionAgentCache(cachePath) {
     if (data && typeof data === "object") {
       for (const [k, v] of Object.entries(data)) {
         if (typeof v === "string") {
-          sessionAgentMap.set(k, v);
+          sessionAgentMap.set(k, {
+            agentId: v,
+            createdAt: Date.now(),
+            expiresAt: Number.MAX_SAFE_INTEGER
+          });
+          continue;
+        }
+        const agentId = v?.agentId;
+        if (typeof agentId === "string" && agentId) {
+          const createdAt = toInt(v?.createdAt, Date.now());
+          const expiresAt = toInt(v?.expiresAt, Number.MAX_SAFE_INTEGER);
+          sessionAgentMap.set(k, { agentId, createdAt, expiresAt });
         }
       }
     }
@@ -225,9 +373,55 @@ async function loadSessionAgentCache(cachePath) {
 }
 
 async function persistSessionAgentCache(cachePath) {
-  const obj = Object.fromEntries(sessionAgentMap.entries());
+  const obj = Object.fromEntries(
+    Array.from(sessionAgentMap.entries()).map(([sessionId, value]) => [
+      sessionId,
+      {
+        agentId: value.agentId,
+        createdAt: value.createdAt,
+        expiresAt: value.expiresAt
+      }
+    ])
+  );
   await mkdir(dirname(cachePath), { recursive: true });
   await writeFile(cachePath, JSON.stringify(obj, null, 2), "utf8");
+}
+
+function getValidCachedAgent(sessionId) {
+  const cached = sessionAgentMap.get(sessionId);
+  if (!cached?.agentId) {
+    return null;
+  }
+  if (Number.isFinite(cached.expiresAt) && cached.expiresAt <= Date.now()) {
+    sessionAgentMap.delete(sessionId);
+    return null;
+  }
+  return cached;
+}
+
+function isAgentMissingError(error) {
+  const text = String(error ?? "").toLowerCase();
+  return text.includes("/v1/agents/") && (text.includes("404") || text.includes("not found"));
+}
+
+function buildReplyFallback({ traceId, reason, payload }) {
+  const compactPayload = tryStringifyPayload(payload, 1600);
+  return `Plugin(fallback): ${reason}. traceId=${traceId}. payload=${compactPayload}`;
+}
+
+function tryStringifyPayload(payload, maxLen) {
+  try {
+    const text = JSON.stringify(payload);
+    if (!text) {
+      return "{}";
+    }
+    if (text.length <= maxLen) {
+      return text;
+    }
+    return `${text.slice(0, maxLen)}...(truncated)`;
+  } catch {
+    return String(payload ?? "null");
+  }
 }
 
 function readConfig(config, env, key, fallback) {

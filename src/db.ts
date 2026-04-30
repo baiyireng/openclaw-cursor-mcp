@@ -39,6 +39,7 @@ interface ApprovalRecord {
   status: ApprovalStatus;
   requestedAt: string;
   updatedAt: string;
+  expiresAt?: string;
 }
 
 interface AuditRecord {
@@ -177,7 +178,8 @@ export async function createApproval(
   sessionId: string,
   requestedAction: PermissionAction,
   reason: string,
-  now: string
+  now: string,
+  expiresAt?: string
 ): Promise<void> {
   await mutateState((state) => {
     state.approvals.push({
@@ -187,7 +189,8 @@ export async function createApproval(
       reason,
       status: "pending",
       requestedAt: now,
-      updatedAt: now
+      updatedAt: now,
+      expiresAt
     });
   });
 }
@@ -222,7 +225,8 @@ export async function getApprovalById(approvalId: string) {
     reason: approval.reason,
     status: approval.status,
     requested_at: approval.requestedAt,
-    updated_at: approval.updatedAt
+    updated_at: approval.updatedAt,
+    expires_at: approval.expiresAt ?? null
   };
 }
 
@@ -238,7 +242,8 @@ export async function listApprovals() {
     reason: r.reason,
     status: r.status,
     requestedAt: r.requestedAt,
-    updatedAt: r.updatedAt
+    updatedAt: r.updatedAt,
+    expiresAt: r.expiresAt ?? null
   }));
 }
 
@@ -247,7 +252,14 @@ export async function hasGrantedPermission(sessionId: string, requestedAction: P
   const rows = state.approvals
     .filter((item) => item.sessionId === sessionId && item.requestedAction === requestedAction)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  return rows[0]?.status === "granted";
+  const latest = rows[0];
+  if (!latest || latest.status !== "granted") {
+    return false;
+  }
+  if (!latest.expiresAt) {
+    return true;
+  }
+  return Date.now() < Date.parse(latest.expiresAt);
 }
 
 export async function addAuditLog(

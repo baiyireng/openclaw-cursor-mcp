@@ -8,6 +8,11 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "gateway": "node gateway/server.mjs",
+    "gateway:start": "node gateway/manage.mjs start",
+    "gateway:stop": "node gateway/manage.mjs stop",
+    "gateway:restart": "node gateway/manage.mjs restart",
+    "gateway:status": "node gateway/manage.mjs status",
+    "gateway:logs": "node gateway/manage.mjs logs",
     "bridge:mock": "node gateway/cursor-cli-wrapper.mjs demo-session demo-message"
   },
   "keywords": [
