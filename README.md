@@ -59,12 +59,21 @@ npm run cli -- init
 编辑 `.env.local`，填写：
 
 - `CURSOR_CLOUD_API_KEY=<your_key>`
+- `CURSOR_CLOUD_REPO_URL=https://github.com/<org>/<repo>`
+- 可选：`CURSOR_CLOUD_REPO_REF=main`
 
 ### 3) 一键拉起
 
 ```bash
 npm run cli -- up
 ```
+
+`up` 会自动执行：
+
+- 检查并自动选择可用网关端口（占用时自动递增）
+- 启动 gateway（后台）
+- 检查 MCP `dist/index.js` 构建产物（OpenClaw 拉起时可直接使用）
+- 健康检查通过后输出可用状态
 
 可选运维命令：
 
@@ -73,7 +82,12 @@ npm run cli -- status
 npm run cli -- logs
 npm run cli -- down
 npm run cli -- doctor
+npm run cli -- doctor --fix
 ```
+
+`down` 会停止 gateway 后台进程。MCP 为 stdio 模式，由 OpenClaw 在调用时拉起。
+
+`doctor --fix` 会自动补齐缺失的初始化文件并尝试构建 `dist/`。
 
 你也可以全局安装后使用同名命令：
 
@@ -82,6 +96,35 @@ npm i -g .
 openclaw-cursor-mcp init
 openclaw-cursor-mcp up
 ```
+
+## 发布建议
+
+发布前建议执行：
+
+```bash
+npm run build
+npm run cli -- doctor --fix
+npm run acceptance:check
+```
+
+本地验证无误后可发布：
+
+```bash
+npm pack
+# 或 npm publish（发布到 npm）
+```
+
+## 上线前检查清单
+
+- `.env.local` 已配置：
+  - `CURSOR_CLOUD_API_KEY`
+  - `CURSOR_CLOUD_REPO_URL`
+  - `CURSOR_CLOUD_REPO_REF`
+  - `OPENCLAW_ADMIN_TOKEN`
+- `npm run cli -- doctor --fix` 全 PASS
+- `npm run acceptance:check` 通过（含真实 `/chat` 调用）
+- `npm run gateway:status` 显示 running 且 `/health` 正常
+- OpenClaw 已导入 `examples/openclaw-mcp-config.generated.json`
 
 开发模式：
 
@@ -213,6 +256,8 @@ npm run dev
 - `CURSOR_CLOUD_API_KEY`：插件模式下调用 Cloud Agents API 的 Bearer Token。
 - `CURSOR_CLOUD_API_BASE_URL`：Cloud API 地址，默认 `https://api.cursor.com`。
 - `CURSOR_CLOUD_WORKSPACE_PATH`：创建 agent 时使用的工作目录，默认 `.`。
+- `CURSOR_CLOUD_REPO_URL`：Cloud Agents API v1 必填，agent 操作的 GitHub 仓库 URL。
+- `CURSOR_CLOUD_REPO_REF`：仓库起始分支/标签/提交，默认 `main`。
 - `CURSOR_CLOUD_MODEL`：可选，指定 Cloud Agent 模型。
 - `CURSOR_CLOUD_POLL_INTERVAL_MS`：run 状态轮询间隔，默认 `1500`。
 - `CURSOR_CLOUD_POLL_MAX_INTERVAL_MS`：指数退避轮询的最大间隔，默认 `5000`。

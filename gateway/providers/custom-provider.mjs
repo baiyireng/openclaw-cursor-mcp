@@ -20,6 +20,8 @@ export async function generateReply(sessionId, message, context) {
   }
 
   const workspacePath = String(readConfig(config, env, "CURSOR_CLOUD_WORKSPACE_PATH", "."));
+  const repoUrl = String(readConfig(config, env, "CURSOR_CLOUD_REPO_URL", "")).trim();
+  const startingRef = String(readConfig(config, env, "CURSOR_CLOUD_REPO_REF", "main")).trim();
   const model = readConfig(config, env, "CURSOR_CLOUD_MODEL", "");
   const pollIntervalMs = toInt(readConfig(config, env, "CURSOR_CLOUD_POLL_INTERVAL_MS", 1500), 1500);
   const timeoutMs = toInt(readConfig(config, env, "CURSOR_CLOUD_TIMEOUT_MS", 120000), 120000);
@@ -30,11 +32,17 @@ export async function generateReply(sessionId, message, context) {
   const pollMaxIntervalMs = toInt(readConfig(config, env, "CURSOR_CLOUD_POLL_MAX_INTERVAL_MS", 5000), 5000);
   const pollBackoffMultiplier = toFloat(readConfig(config, env, "CURSOR_CLOUD_POLL_BACKOFF_MULTIPLIER", 1.5), 1.5);
 
+  if (!repoUrl) {
+    throw new Error("CURSOR_CLOUD_REPO_URL is required for Cloud Agents API v1");
+  }
+
   const agentId = await ensureAgent(sessionId, {
     baseUrl,
     apiKey,
     model,
     workspacePath,
+    repoUrl,
+    startingRef,
     cachePath,
     traceId,
     agentTtlMs
@@ -50,12 +58,14 @@ export async function generateReply(sessionId, message, context) {
     cachePath,
     model,
     workspacePath,
-    agentTtlMs
+    agentTtlMs,
+    timeoutMs,
+    pollIntervalMs
   });
   const activeAgentId = runInfo.agentId;
   const run = runInfo.run;
 
-  const runId = pick(run, ["id", "run_id", "runId"]);
+  const runId = pick(run, ["id", "run_id", "runId", "run.id"]);
   if (!runId) {
     throw new Error(`create run succeeded but run id missing: ${JSON.stringify(run)}`);
   }
@@ -95,15 +105,22 @@ async function ensureAgent(sessionId, opts) {
 
 async function createAndCacheAgent(sessionId, opts) {
   const payload = {
-    name: `openclaw-${sessionId}`,
-    workspace: { path: opts.workspacePath }
+    prompt: {
+      text: `Initialize agent context for OpenClaw session ${sessionId}.`
+    },
+    repos: [
+      {
+        url: opts.repoUrl,
+        startingRef: opts.startingRef || "main"
+      }
+    ]
   };
   if (opts.model) {
-    payload.model = opts.model;
+    payload.model = { id: String(opts.model) };
   }
 
   const created = await postJson(`${opts.baseUrl}/v1/agents`, payload, opts.apiKey, opts.traceId);
-  const agentId = pick(created, ["id", "agent_id", "agentId"]);
+  const agentId = pick(created, ["id", "agent_id", "agentId", "agent.id"]);
   if (!agentId) {
     throw new Error(`create agent response missing id: ${JSON.stringify(created)}`);
   }
@@ -118,12 +135,21 @@ async function createAndCacheAgent(sessionId, opts) {
 }
 
 async function createRun({ baseUrl, apiKey, agentId, message, traceId }) {
-  return postJson(`${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/runs`, { message }, apiKey, traceId);
+  return postJson(
+    `${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/runs`,
+    {
+      prompt: {
+        text: message
+      }
+    },
+    apiKey,
+    traceId
+  );
 }
 
 async function createRunWithRecovery(opts) {
   try {
-    const run = await createRun(opts);
+    const run = await createRunWithBusyRetry(opts);
     return { run, agentId: opts.agentId };
   } catch (error) {
     if (!isAgentMissingError(error)) {
@@ -133,14 +159,70 @@ async function createRunWithRecovery(opts) {
     sessionAgentMap.delete(opts.sessionId);
     await persistSessionAgentCache(opts.cachePath);
     const refreshedAgentId = await createAndCacheAgent(opts.sessionId, opts);
-    const run = await createRun({
+    const run = await createRunWithBusyRetry({
       baseUrl: opts.baseUrl,
       apiKey: opts.apiKey,
       agentId: refreshedAgentId,
       message: opts.message,
-      traceId: opts.traceId
+      traceId: opts.traceId,
+      timeoutMs: opts.timeoutMs ?? 120000,
+      pollIntervalMs: opts.pollIntervalMs ?? 1500
     });
     return { run, agentId: refreshedAgentId };
+  }
+}
+
+async function createRunWithBusyRetry({ baseUrl, apiKey, agentId, message, traceId, timeoutMs = 120000, pollIntervalMs = 1500 }) {
+  try {
+    return await createRun({ baseUrl, apiKey, agentId, message, traceId });
+  } catch (error) {
+    if (!isAgentBusyError(error)) {
+      throw error;
+    }
+    await waitUntilAgentIdle({ baseUrl, apiKey, agentId, traceId, timeoutMs, pollIntervalMs });
+    return createRun({ baseUrl, apiKey, agentId, message, traceId });
+  }
+}
+
+async function waitUntilAgentIdle({ baseUrl, apiKey, agentId, traceId, timeoutMs, pollIntervalMs }) {
+  const deadline = Date.now() + Math.max(5000, timeoutMs);
+  let cancelAttempted = false;
+  while (Date.now() < deadline) {
+    const list = await getJson(
+      `${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/runs?limit=5`,
+      apiKey,
+      traceId
+    );
+    const runs = Array.isArray(list?.items) ? list.items : [];
+    const active = runs.find((run) => {
+      const status = String(pick(run, ["status", "state"]) ?? "").toLowerCase();
+      return status === "creating" || status === "running";
+    });
+    if (!active) {
+      return;
+    }
+    if (!cancelAttempted) {
+      const activeRunId = pick(active, ["id", "runId", "run_id"]);
+      if (activeRunId) {
+        await tryCancelRun({ baseUrl, apiKey, agentId, runId: String(activeRunId), traceId });
+        cancelAttempted = true;
+      }
+    }
+    await sleep(Math.min(3000, Math.max(500, pollIntervalMs)));
+  }
+  throw new Error(`agent_busy wait timeout for agent=${agentId}`);
+}
+
+async function tryCancelRun({ baseUrl, apiKey, agentId, runId, traceId }) {
+  try {
+    await postJson(
+      `${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/cancel`,
+      {},
+      apiKey,
+      traceId
+    );
+  } catch {
+    // best effort
   }
 }
 
@@ -166,8 +248,8 @@ async function waitForRunDone({
       apiKey,
       traceId
     );
-    const status = pick(last, ["status", "state"]);
-    if (status === "completed" || status === "succeeded") {
+    const status = String(pick(last, ["status", "state"]) ?? "").toLowerCase();
+    if (status === "completed" || status === "succeeded" || status === "finished") {
       return last;
     }
     if (status === "failed" || status === "cancelled" || status === "canceled") {
@@ -204,9 +286,10 @@ async function getJson(url, apiKey, traceId) {
 }
 
 function buildHeaders(apiKey, traceId) {
+  const basic = Buffer.from(`${apiKey}:`).toString("base64");
   return {
     "content-type": "application/json",
-    authorization: `Bearer ${apiKey}`,
+    authorization: `Basic ${basic}`,
     "x-trace-id": traceId
   };
 }
@@ -227,7 +310,7 @@ function extractReply(payload) {
     return null;
   }
 
-  const direct = pick(payload, ["reply", "output", "text", "final_output", "finalOutput"]);
+  const direct = pick(payload, ["reply", "output", "text", "final_output", "finalOutput", "result"]);
   if (typeof direct === "string" && direct.trim()) {
     return direct.trim();
   }
@@ -295,7 +378,12 @@ function pick(obj, keys) {
     return undefined;
   }
   for (const k of keys) {
-    if (obj[k] !== undefined && obj[k] !== null) {
+    if (k.includes(".")) {
+      const value = k.split(".").reduce((acc, key) => (acc && typeof acc === "object" ? acc[key] : undefined), obj);
+      if (value !== undefined && value !== null) {
+        return value;
+      }
+    } else if (obj[k] !== undefined && obj[k] !== null) {
       return obj[k];
     }
   }
@@ -402,6 +490,11 @@ function getValidCachedAgent(sessionId) {
 function isAgentMissingError(error) {
   const text = String(error ?? "").toLowerCase();
   return text.includes("/v1/agents/") && (text.includes("404") || text.includes("not found"));
+}
+
+function isAgentBusyError(error) {
+  const text = String(error ?? "").toLowerCase();
+  return text.includes("agent_busy") || (text.includes("409") && text.includes("active run"));
 }
 
 function buildReplyFallback({ traceId, reason, payload }) {

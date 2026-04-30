@@ -17,6 +17,7 @@
     "gateway:restart": "node gateway/manage.mjs restart",
     "gateway:status": "node gateway/manage.mjs status",
     "gateway:logs": "node gateway/manage.mjs logs",
+    "acceptance:check": "node scripts/acceptance-check.mjs",
     "bridge:mock": "node gateway/cursor-cli-wrapper.mjs demo-session demo-message"
   },
   "keywords": [

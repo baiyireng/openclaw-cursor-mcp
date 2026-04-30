@@ -2,10 +2,11 @@ import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
+await loadRuntimeEnvFile();
 const configState = await loadGatewayConfig();
 const config = configState.data;
 const configPath = configState.path;
@@ -381,15 +382,21 @@ async function testCloudConnection(payload, currentConfig, traceId) {
       return { ok: false, code: "MISSING_API_KEY", message: "缺少 CURSOR_CLOUD_API_KEY，无法测试", traceId };
     }
 
+    const basic = Buffer.from(`${apiKey}:`).toString("base64");
     const resp = await fetch(`${baseUrl}/v1/agents`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`
+        authorization: `Basic ${basic}`
       },
       body: JSON.stringify({
-        name: "openclaw-config-test",
-        workspace: { path: String(cloud.CURSOR_CLOUD_WORKSPACE_PATH ?? ".") }
+        prompt: { text: "Health check from openclaw gateway config page." },
+        repos: [
+          {
+            url: String(cloud.CURSOR_CLOUD_REPO_URL ?? ""),
+            startingRef: String(cloud.CURSOR_CLOUD_REPO_REF ?? "main")
+          }
+        ]
       })
     });
 
@@ -436,5 +443,30 @@ class AppError extends Error {
     this.status = status;
     this.retryable = retryable;
     this.detail = detail;
+  }
+}
+
+async function loadRuntimeEnvFile() {
+  const configured = process.env.OPENCLAW_ENV_FILE ?? ".env.local";
+  const envPath = isAbsolute(configured) ? configured : resolve(process.cwd(), configured);
+  try {
+    const text = await readFile(envPath, "utf8");
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) {
+        continue;
+      }
+      const sep = line.indexOf("=");
+      if (sep <= 0) {
+        continue;
+      }
+      const key = line.slice(0, sep).trim();
+      const value = line.slice(sep + 1).trim().replace(/^"(.*)"$/, "$1");
+      if (process.env[key] === undefined || process.env[key] === "") {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // optional env file
   }
 }

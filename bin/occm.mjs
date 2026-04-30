@@ -5,15 +5,17 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:net";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const envPath = resolve(root, ".env.local");
 const gatewayConfigPath = resolve(root, "gateway/config/gateway.config.json");
 const generatedOpenClawConfigPath = resolve(root, "examples/openclaw-mcp-config.generated.json");
 const gatewayManagePath = resolve(root, "gateway/manage.mjs");
-const gatewayHealthUrl = "http://127.0.0.1:8791/health";
+const defaultGatewayPort = 8791;
 
 const command = process.argv[2] ?? "help";
+const flags = new Set(process.argv.slice(3));
 
 async function main() {
   if (command === "init") {
@@ -37,7 +39,7 @@ async function main() {
     return;
   }
   if (command === "doctor") {
-    await doDoctor();
+    await doDoctor(flags.has("--fix"));
     return;
   }
   printHelp();
@@ -66,7 +68,9 @@ async function doInit() {
     cloud: {
       CURSOR_CLOUD_API_KEY: "",
       CURSOR_CLOUD_API_BASE_URL: "https://api.cursor.com",
-      CURSOR_CLOUD_WORKSPACE_PATH: "."
+      CURSOR_CLOUD_WORKSPACE_PATH: ".",
+      CURSOR_CLOUD_REPO_URL: "",
+      CURSOR_CLOUD_REPO_REF: "main"
     }
   });
   await writeJson(gatewayConfigPath, mergedGatewayConfig);
@@ -103,8 +107,10 @@ async function doUp() {
     process.stderr.write("CURSOR_CLOUD_API_KEY is empty. Please set it in .env.local first.\n");
     process.exit(1);
   }
+  const gatewayPort = await ensureGatewayPort();
   await ensureBuild();
   await runNodeScript(gatewayManagePath, ["start"], env);
+  const gatewayHealthUrl = `http://127.0.0.1:${gatewayPort}/health`;
   const healthy = await waitForHealth(gatewayHealthUrl, 10, 1000);
   if (!healthy) {
     process.stderr.write("Gateway health check failed after startup.\n");
@@ -112,6 +118,7 @@ async function doUp() {
   }
   process.stdout.write("System is up.\n");
   process.stdout.write(`Gateway healthy: ${gatewayHealthUrl}\n`);
+  process.stdout.write("MCP stdio server is ready (will be started by OpenClaw on demand).\n");
   process.stdout.write(`OpenClaw MCP template: ${generatedOpenClawConfigPath}\n`);
 }
 
@@ -125,9 +132,10 @@ async function doStatus() {
   const env = await loadEnvFile(envPath);
   const gatewayStatus = await runNodeScript(gatewayManagePath, ["status"], env);
   const distExists = await exists(resolve(root, "dist/index.js"));
-  const health = await probeHealth(gatewayHealthUrl);
+  const gatewayPort = await getConfiguredGatewayPort();
+  const health = await probeHealth(`http://127.0.0.1:${gatewayPort}/health`);
   process.stdout.write(`${gatewayStatus}\n`);
-  process.stdout.write(`MCP build: ${distExists ? "ready" : "missing"}\n`);
+  process.stdout.write(`MCP stdio build: ${distExists ? "ready" : "missing"}\n`);
   process.stdout.write(`Gateway health: ${health.ok ? "ok" : `failed (${health.reason})`}\n`);
 }
 
@@ -137,15 +145,26 @@ async function doLogs() {
   process.stdout.write(`${output}\n`);
 }
 
-async function doDoctor() {
+async function doDoctor(autoFix = false) {
+  if (autoFix) {
+    await applyDoctorFixes();
+  }
   const env = await loadEnvFile(envPath);
   const checks = [];
   checks.push({ name: ".env.local exists", ok: await exists(envPath) });
   checks.push({ name: "CURSOR_CLOUD_API_KEY configured", ok: Boolean(env.CURSOR_CLOUD_API_KEY) });
   checks.push({ name: "gateway config exists", ok: await exists(gatewayConfigPath) });
   checks.push({ name: "MCP dist build exists", ok: await exists(resolve(root, "dist/index.js")) });
-  const health = await probeHealth(gatewayHealthUrl);
-  checks.push({ name: "gateway health", ok: health.ok, detail: health.reason });
+  const gatewayStatusRaw = await runNodeScript(gatewayManagePath, ["status"], env);
+  const gatewayRunning = gatewayStatusRaw.includes("Gateway status: running");
+  checks.push({ name: "gateway manager callable", ok: true });
+  const gatewayPort = await getConfiguredGatewayPort();
+  const health = await probeHealth(`http://127.0.0.1:${gatewayPort}/health`);
+  checks.push({
+    name: "gateway health",
+    ok: gatewayRunning ? health.ok : true,
+    detail: gatewayRunning ? health.reason : "gateway not running (start with 'openclaw-cursor-mcp up')"
+  });
 
   for (const check of checks) {
     process.stdout.write(`- ${check.ok ? "PASS" : "FAIL"}: ${check.name}${check.detail ? ` (${check.detail})` : ""}\n`);
@@ -163,7 +182,7 @@ function printHelp() {
   process.stdout.write("  down    Stop gateway\n");
   process.stdout.write("  status  Show gateway + build + health status\n");
   process.stdout.write("  logs    Show gateway logs\n");
-  process.stdout.write("  doctor  Run environment diagnostics\n");
+  process.stdout.write("  doctor  Run diagnostics (use --fix for auto-fix)\n");
 }
 
 async function ensureBuild() {
@@ -180,6 +199,47 @@ async function runNodeScript(scriptPath, args, envPatch) {
   const mergedEnv = { ...process.env, ...envPatch, OPENCLAW_ENV_FILE: envPath };
   const result = await runCommand(process.execPath, [scriptPath, ...args], root, mergedEnv);
   return [result.stdout, result.stderr].filter(Boolean).join("").trim();
+}
+
+async function ensureGatewayPort() {
+  const cfg = await loadJson(gatewayConfigPath, {});
+  const currentPort = Number(cfg?.gateway?.port ?? defaultGatewayPort);
+  const desired = Number.isFinite(currentPort) ? currentPort : defaultGatewayPort;
+  const available = await findAvailablePort(desired);
+  if (available !== desired) {
+    const nextConfig = deepMerge(cfg, { gateway: { port: available } });
+    await writeJson(gatewayConfigPath, nextConfig);
+    process.stdout.write(`Gateway port ${desired} unavailable, switched to ${available}.\n`);
+  }
+  return available;
+}
+
+async function getConfiguredGatewayPort() {
+  const cfg = await loadJson(gatewayConfigPath, {});
+  const port = Number(cfg?.gateway?.port ?? defaultGatewayPort);
+  return Number.isFinite(port) ? port : defaultGatewayPort;
+}
+
+async function findAvailablePort(startPort) {
+  let port = startPort;
+  for (let i = 0; i < 30; i += 1) {
+    if (await isPortAvailable(port)) {
+      return port;
+    }
+    port += 1;
+  }
+  throw new Error(`No available port found from ${startPort}`);
+}
+
+async function isPortAvailable(port) {
+  return new Promise((resolveDone) => {
+    const server = createServer();
+    server.once("error", () => resolveDone(false));
+    server.once("listening", () => {
+      server.close(() => resolveDone(true));
+    });
+    server.listen(port, "127.0.0.1");
+  });
 }
 
 async function runCommand(command, args, cwd, env) {
@@ -238,6 +298,24 @@ async function loadEnvFile(path) {
   } catch {
     return {};
   }
+}
+
+async function applyDoctorFixes() {
+  const fixes = [];
+  if (!(await exists(envPath))) {
+    fixes.push(".env.local");
+  }
+  if (!(await exists(gatewayConfigPath))) {
+    fixes.push("gateway config");
+  }
+  if (!(await exists(generatedOpenClawConfigPath))) {
+    fixes.push("OpenClaw template");
+  }
+  if (fixes.length > 0) {
+    process.stdout.write(`Applying fixes: ${fixes.join(", ")}\n`);
+    await doInit();
+  }
+  await ensureBuild();
 }
 
 function parseEnv(text) {
