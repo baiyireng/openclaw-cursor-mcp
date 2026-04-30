@@ -1,0 +1,20 @@
+{
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 8791,
+    "mode": "plugin"
+  },
+  "plugin": {
+    "module": "./providers/custom-provider.mjs"
+  },
+  "cloud": {
+    "CURSOR_CLOUD_API_KEY": "",
+    "CURSOR_CLOUD_API_BASE_URL": "https://api.cursor.com",
+    "CURSOR_CLOUD_WORKSPACE_PATH": ".",
+    "CURSOR_CLOUD_MODEL": "",
+    "CURSOR_CLOUD_POLL_INTERVAL_MS": 1500,
+    "CURSOR_CLOUD_TIMEOUT_MS": 120000,
+    "CURSOR_CLOUD_REQUIRED": false,
+    "CURSOR_SESSION_AGENT_CACHE_PATH": "./data/session-agent-map.json"
+  }
+}

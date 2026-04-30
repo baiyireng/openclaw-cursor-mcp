@@ -1,0 +1,29 @@
+{
+  "name": "openclaw-cursor-mcp",
+  "version": "0.1.0",
+  "description": "MCP bridge server for OpenClaw to manage Cursor sessions and approvals",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "gateway": "node gateway/server.mjs",
+    "bridge:mock": "node gateway/cursor-cli-wrapper.mjs demo-session demo-message"
+  },
+  "keywords": [
+    "mcp",
+    "cursor",
+    "openclaw"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}

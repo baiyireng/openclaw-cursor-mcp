@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "openclaw-cursor-mcp": {
+      "command": "node",
+      "args": [
+        "D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/dist/index.js"
+      ],
+      "env": {
+        "OPENCLAW_CURSOR_DB_PATH": "D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/data/openclaw-cursor-db.json",
+        "OPENCLAW_ADMIN_TOKEN": "replace-with-strong-token",
+        "CURSOR_ADAPTER_MODE": "mock",
+        "CURSOR_API_BASEURL": "",
+        "CURSOR_API_ENDPOINT": "/chat",
+        "CURSOR_CLI_CMD": "",
+        "CURSOR_GATEWAY_MODE": "cli",
+        "CURSOR_GATEWAY_CONFIG_PATH": "D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/gateway/config/gateway.config.json",
+        "CURSOR_GATEWAY_CLI_CMD": "node",
+        "CURSOR_GATEWAY_CLI_ARGS_JSON": "[\"D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/gateway/cursor-cli-wrapper.mjs\",\"{{sessionId}}\",\"{{message}}\"]",
+        "CURSOR_GATEWAY_CLI_TIMEOUT_MS": "60000",
+        "CURSOR_BRIDGE_MODE": "cursor-agent-json",
+        "CURSOR_AGENT_CMD": "cursor.cmd",
+        "CURSOR_AGENT_MODEL": "",
+        "CURSOR_AGENT_PROMPT_PREFIX": "You are receiving a proxied request from OpenClaw MCP bridge. Reply with plain text only.",
+        "CURSOR_CLOUD_API_KEY": "",
+        "CURSOR_CLOUD_API_BASE_URL": "https://api.cursor.com",
+        "CURSOR_CLOUD_WORKSPACE_PATH": ".",
+        "CURSOR_CLOUD_MODEL": "",
+        "CURSOR_CLOUD_POLL_INTERVAL_MS": "1500",
+        "CURSOR_CLOUD_TIMEOUT_MS": "120000",
+        "CURSOR_CLOUD_REQUIRED": "false",
+        "CURSOR_SESSION_AGENT_CACHE_PATH": "D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/data/session-agent-map.json",
+        "CURSOR_REAL_CLI_CMD": "",
+        "CURSOR_REAL_CLI_ARGS_JSON": "[\"{{sessionId}}\", \"{{message}}\"]",
+        "CURSOR_REAL_CLI_TIMEOUT_MS": "120000"
+      }
+    }
+  }
+}

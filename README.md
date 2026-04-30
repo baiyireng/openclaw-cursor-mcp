@@ -1,0 +1,269 @@
+# openclaw-cursor-mcp
+
+一个用于连接 OpenClaw 与 Cursor 的 MCP Server，可做会话管理、授权流控和审计。
+
+## 功能
+
+- 管理对话会话：
+  - `cursor_session_create`
+  - `cursor_session_send_message`
+  - `cursor_session_get`
+  - `cursor_session_list`
+- 管理授权：
+  - `cursor_permission_request`
+  - `cursor_permission_grant`
+  - `cursor_permission_revoke`
+  - `cursor_permission_list`
+
+当前版本使用 JSON 文件持久化（默认 `./data/openclaw-cursor-db.json`）。
+
+新增：
+
+- `cursor_audit_list`：查询审计事件。
+- `cursor_session_send_message` 默认强制 `chat_send` 授权检查。
+- `cursor_session_send_message` 支持 `idempotencyKey` 去重（重试不重复执行）。
+- `cursor_permission_grant` / `cursor_permission_revoke` 强制 `adminToken` 校验。
+
+## 快速开始
+
+```bash
+npm install
+npm run build
+npm start
+```
+
+开发模式：
+
+```bash
+npm run dev
+```
+
+启动 HTTP 网关（Cursor 下游入口）：
+
+```bash
+npm run gateway
+```
+
+打开可视化配置页面（网关启动后）：
+
+- `http://127.0.0.1:8787/config`
+- 支持在线编辑并保存 `gateway/config/gateway.config.json`
+
+## 全流程测试（推荐）
+
+### 0. 编译
+
+```bash
+npm install
+npm run build
+```
+
+### 1. 启动 Gateway（下游）
+
+```bash
+npm run gateway
+```
+
+启动成功日志示例：
+
+`Cursor HTTP gateway listening on http://127.0.0.1:8791 (mode=plugin)`
+
+> 注意：健康检查地址必须和日志里的端口一致。  
+> 例如日志是 `8791`，就访问 `http://127.0.0.1:8791/health`，不是 `8787`。
+
+### 2. 配置插件（可视化）
+
+浏览器打开：
+
+- `http://127.0.0.1:<gateway_port>/config`
+
+在页面里填写：
+
+- `cloud.CURSOR_CLOUD_API_KEY`
+- 其他 Cloud 配置（按需）
+
+点击：
+
+- `测试 Cloud 连通性`
+- `保存`
+
+然后重启 gateway 生效。
+
+### 3. 启动 MCP Server（上游）
+
+新开终端，在项目根目录：
+
+```bash
+npm start
+```
+
+或开发模式：
+
+```bash
+npm run dev
+```
+
+### 4. 在 OpenClaw 导入 MCP
+
+参考 `examples/openclaw-mcp-config.json`，确保：
+
+- `command` 指向 `node`
+- `args` 指向 `dist/index.js`
+- `CURSOR_ADAPTER_MODE=http`
+- `CURSOR_API_BASEURL=http://127.0.0.1:<gateway_port>`
+- `CURSOR_API_ENDPOINT=/chat`
+
+### 5. 端到端调用顺序
+
+1. `cursor_session_create`
+2. `cursor_permission_request`（`requestedAction=chat_send`）
+3. `cursor_permission_grant`（带 `adminToken`）
+4. `cursor_session_send_message`
+5. `cursor_session_get` / `cursor_audit_list`
+
+可选环境变量：
+
+- `OPENCLAW_CURSOR_DB_PATH`：持久化文件路径（JSON）。
+- `OPENCLAW_ADMIN_TOKEN`：授权审批管理员令牌（必配，供 grant/revoke 校验）。
+- `CURSOR_ADAPTER_MODE`：`mock` / `http` / `cli`。
+- `CURSOR_API_BASEURL`：`http` 模式下 Cursor 后端地址。
+- `CURSOR_API_ENDPOINT`：`http` 模式下接口路径，默认 `/chat`。
+- `CURSOR_CLI_CMD`：`cli` 模式下命令路径，参数为 `[sessionId, message]`。
+- `CURSOR_GATEWAY_CONFIG_PATH`：网关配置文件路径（默认 `gateway/config/gateway.config.json`）。
+- `CURSOR_GATEWAY_HOST`：网关监听地址（环境变量优先于配置文件）。
+- `CURSOR_GATEWAY_PORT`：网关监听端口（环境变量优先于配置文件）。
+- `CURSOR_GATEWAY_MODE`：网关后端模式，`mock` / `cli` / `plugin`（环境变量优先于配置文件）。
+- `CURSOR_GATEWAY_CLI_CMD`：网关 `cli` 模式下执行命令。
+- `CURSOR_GATEWAY_CLI_ARGS_JSON`：网关 `cli` 模式命令参数模板（JSON 字符串数组，支持 `{{sessionId}}`、`{{message}}`）。
+- `CURSOR_GATEWAY_CLI_TIMEOUT_MS`：网关 `cli` 模式超时，默认 `60000`。
+- `CURSOR_GATEWAY_PLUGIN`：网关 `plugin` 模式的模块路径（默认 `./providers/custom-provider.mjs`）。
+- `CURSOR_CLOUD_API_KEY`：插件模式下调用 Cloud Agents API 的 Bearer Token。
+- `CURSOR_CLOUD_API_BASE_URL`：Cloud API 地址，默认 `https://api.cursor.com`。
+- `CURSOR_CLOUD_WORKSPACE_PATH`：创建 agent 时使用的工作目录，默认 `.`。
+- `CURSOR_CLOUD_MODEL`：可选，指定 Cloud Agent 模型。
+- `CURSOR_CLOUD_POLL_INTERVAL_MS`：run 状态轮询间隔，默认 `1500`。
+- `CURSOR_CLOUD_TIMEOUT_MS`：run 超时，默认 `120000`。
+- `CURSOR_CLOUD_REQUIRED`：`true` 时若缺少 API key 直接报错；否则回退到本地提示回复。
+- `CURSOR_SESSION_AGENT_CACHE_PATH`：`sessionId -> agentId` 持久化缓存文件（默认 `./data/session-agent-map.json`）。
+- `CURSOR_BRIDGE_MODE`：`gateway/cursor-cli-wrapper.mjs` 的模式，`mock` / `cursor-agent-json` / `command`。
+- `CURSOR_REAL_CLI_CMD`：wrapper 在 `command` 模式下调用的真实命令。
+- `CURSOR_REAL_CLI_ARGS_JSON`：真实命令参数模板（JSON 字符串数组，支持 `{{sessionId}}`、`{{message}}`）。
+- `CURSOR_REAL_CLI_TIMEOUT_MS`：真实命令超时，默认 `120000`。
+- `CURSOR_AGENT_CMD`：`cursor-agent-json` 模式下的命令名，Windows 默认 `cursor.cmd`，其他系统默认 `cursor`。
+- `CURSOR_AGENT_MODEL`：可选，指定 `cursor agent` 使用的模型。
+- `CURSOR_AGENT_PROMPT_PREFIX`：可选，注入到代理 prompt 的前缀说明。
+
+## 与 OpenClaw 联动思路
+
+1. 在 OpenClaw 中将该进程注册为 MCP server（stdio 模式），可参考 `examples/openclaw-mcp-config.json`。
+2. OpenClaw 调用 `cursor_session_create` 创建会话。
+3. 发送消息前，OpenClaw 可先调用 `cursor_permission_request`。
+4. 管理端调用 `cursor_permission_grant`（携带 `adminToken`）通过授权后，再调用 `cursor_session_send_message`（建议带 `idempotencyKey`）。
+5. 通过 `cursor_session_get` / `cursor_session_list` 回读状态。
+6. 用 `cursor_audit_list` 审计关键动作。
+
+## Cursor 真实接入
+
+当前 `src/index.ts` 中 `CursorAdapter` 已支持三种模式：
+
+- `mock`：本地模拟响应，便于联调。
+- `http`：POST 到 `${CURSOR_API_BASEURL}${CURSOR_API_ENDPOINT}`，body 为 `{ sessionId, message }`。
+- `cli`：调用 `CURSOR_CLI_CMD sessionId message` 并读取 stdout 作为回复。
+
+### 最小 HTTP 网关联调
+
+1. 先启动网关：`npm run gateway`
+2. MCP Server 设置：
+   - `CURSOR_ADAPTER_MODE=http`
+   - `CURSOR_API_BASEURL=http://127.0.0.1:8787`
+   - `CURSOR_API_ENDPOINT=/chat`
+3. 健康检查：`GET http://127.0.0.1:8787/health`
+4. 网关聊天接口：
+   - `POST /chat`
+   - 请求体：`{ "sessionId": "xxx", "message": "hello" }`
+   - 返回体：`{ "reply": "..." }`
+
+### 从 mock 迁移到真实 CLI
+
+1. 网关设置为 `cli` 模式，并让它调用 wrapper：
+   - `CURSOR_GATEWAY_MODE=cli`
+   - `CURSOR_GATEWAY_CLI_CMD=node`
+   - `CURSOR_GATEWAY_CLI_ARGS_JSON=["D:/.../gateway/cursor-cli-wrapper.mjs","{{sessionId}}","{{message}}"]`
+2. wrapper 切到真实命令转发：
+   - 方案 A（推荐）：`CURSOR_BRIDGE_MODE=cursor-agent-json`（直接调用 `cursor agent -p --output-format json`）
+   - 方案 B：`CURSOR_BRIDGE_MODE=command` + `CURSOR_REAL_CLI_CMD=<你的真实命令>`
+   - 方案 B 参数：`CURSOR_REAL_CLI_ARGS_JSON=["{{sessionId}}","{{message}}"]`（按真实命令需要调整）
+3. 如果真实命令 stdout 返回 JSON，且包含 `reply` 字段，wrapper 会自动提取该字段；否则原样透传 stdout。
+
+### 当本机 Cursor CLI 不支持 headless 时（推荐）
+
+如果你本机 `cursor` 实测不能稳定执行 `agent -p`，可使用插件后端避免被 CLI 能力卡住：
+
+1. 设置网关为插件模式：
+   - `CURSOR_GATEWAY_MODE=plugin`
+   - `CURSOR_GATEWAY_PLUGIN=./providers/custom-provider.mjs`
+2. 在 `gateway/providers/custom-provider.mjs` 中实现：
+   - `export async function generateReply(sessionId, message, context) { ... }`
+3. 你可以在这个插件里接任意真实后端（自建服务、ACP 客户端、Cloud Agent API 适配层）。
+
+当前仓库自带的 `gateway/providers/custom-provider.mjs` 已实现 Cloud Agents API 版本：
+
+- 首次按 `sessionId` 创建并缓存 `agentId`
+- 每条消息创建 run 并轮询到完成
+- 自动提取 reply 字段（支持多种常见返回结构）
+- `sessionId -> agentId` 会持久化到 `CURSOR_SESSION_AGENT_CACHE_PATH` 文件，重启后仍可复用
+
+### 推荐配置方式（避免每次设环境变量）
+
+1. 编辑 `gateway/config/gateway.config.json`
+2. 启动网关：`npm run gateway`
+3. 浏览器打开 `/config` 页面进行可视化修改
+4. 点击保存后重启网关生效
+
+## 常见问题
+
+### 1) `http://127.0.0.1:8787/health` 无法访问
+
+你的情况通常是端口不一致：
+
+- 你实际启动在 `8791`
+- 但访问了 `8787`
+
+请以网关日志为准访问：
+
+- `http://127.0.0.1:<日志端口>/health`
+
+若端口被占用（`EADDRINUSE`）：
+
+```bash
+netstat -ano | findstr :8787
+taskkill /PID <PID> /F
+```
+
+或直接换端口：
+
+```bash
+$env:CURSOR_GATEWAY_PORT="8791"
+npm run gateway
+```
+
+### 2) `CURSOR_CLOUD_API_KEY` 如何获取
+
+通常在 Cursor 账户的 API/开发者页面创建：
+
+1. 登录 Cursor 账户后台
+2. 进入 API Keys（或 Developer / Cloud Agent API）页面
+3. 创建新 Key 并复制
+4. 填到 `/config` 页的 `cloud.CURSOR_CLOUD_API_KEY` 后保存
+
+文档参考：
+
+- [Cursor API 总览](https://cursor.com/docs/api.md)
+- [Cloud Agent API endpoints](https://cursor.com/docs/cloud-agent/api/endpoints.md)
+
+> 安全建议：不要把 key 提交到 git；只保存在本地配置文件或受控密钥管理中。
+
+建议加上：
+
+- 多租户隔离（OpenClaw 用户/项目维度）；
+- 基于动作与会话级别的策略控制（RBAC/ABAC）。
