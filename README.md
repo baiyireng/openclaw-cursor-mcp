@@ -38,6 +38,51 @@ npm run build
 npm start
 ```
 
+## 一键整合启动（推荐）
+
+目标：只需配置 OpenClaw MCP + `CURSOR_CLOUD_API_KEY` 即可使用。
+
+### 1) 初始化
+
+```bash
+npm run cli -- init
+```
+
+初始化后会生成：
+
+- `.env.local`（本地密钥与管理员 token）
+- `gateway/config/gateway.config.json`（网关配置）
+- `examples/openclaw-mcp-config.generated.json`（OpenClaw 导入模板）
+
+### 2) 配置 API Key
+
+编辑 `.env.local`，填写：
+
+- `CURSOR_CLOUD_API_KEY=<your_key>`
+
+### 3) 一键拉起
+
+```bash
+npm run cli -- up
+```
+
+可选运维命令：
+
+```bash
+npm run cli -- status
+npm run cli -- logs
+npm run cli -- down
+npm run cli -- doctor
+```
+
+你也可以全局安装后使用同名命令：
+
+```bash
+npm i -g .
+openclaw-cursor-mcp init
+openclaw-cursor-mcp up
+```
+
 开发模式：
 
 ```bash

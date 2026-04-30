@@ -760,8 +760,34 @@ async function runGatewayManager(
 }
 
 async function main() {
+  await loadRuntimeEnvFile();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+async function loadRuntimeEnvFile() {
+  const configured = process.env.OPENCLAW_ENV_FILE ?? ".env.local";
+  const envFilePath = isAbsolute(configured) ? configured : resolve(process.cwd(), configured);
+  try {
+    const text = await readFile(envFilePath, "utf8");
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) {
+        continue;
+      }
+      const sep = line.indexOf("=");
+      if (sep <= 0) {
+        continue;
+      }
+      const key = line.slice(0, sep).trim();
+      const value = line.slice(sep + 1).trim().replace(/^"(.*)"$/, "$1");
+      if (process.env[key] === undefined || process.env[key] === "") {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // optional env file; ignore when missing
+  }
 }
 
 main().catch((error: unknown) => {

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "openclaw-cursor-mcp": {
+      "command": "node",
+      "args": [
+        "D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/dist/index.js"
+      ],
+      "env": {
+        "OPENCLAW_ENV_FILE": "D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/.env.local",
+        "OPENCLAW_CURSOR_DB_PATH": "D:/HuaweiMoveData/Users/shihufeng/Desktop/cursor_mcp/openclaw-cursor-mcp/data/openclaw-cursor-db.json",
+        "CURSOR_ADAPTER_MODE": "http",
+        "CURSOR_API_BASEURL": "http://127.0.0.1:8791",
+        "CURSOR_API_ENDPOINT": "/chat"
+      }
+    }
+  }
+}
